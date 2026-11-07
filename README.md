@@ -1,6 +1,7 @@
 # serverwatch
 
 A small Discord bot that watches a headless Debian server and messages you when something is wrong.
+this readme is a guide for me, made by claude.
 
 **Alerts on:** high temperature, CPU, RAM, disk usage and network bandwidth (download or upload). Each alert lists the processes responsible. You can view and change every setting from Discord with `/config`, and `/status` shows a live snapshot including an estimated power draw.
 
