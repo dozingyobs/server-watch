@@ -1,0 +1,18 @@
+services:
+  serverwatch:
+    build: .
+    container_name: serverwatch
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST_ROOT: /host      # where the host's filesystem is mounted below
+    # Share the host's view of the system so we monitor the host, not the container:
+    network_mode: host      # real network interfaces/bandwidth
+    pid: host               # see every host process
+    uts: host               # report the real hostname
+    cap_add:
+      - SYS_PTRACE          # read other processes' disk I/O
+      - NET_ADMIN           # nethogs: per-process bandwidth
+      - NET_RAW
+    volumes:
+      - /:/host:ro          # read-only host filesystem for disk usage + biggest-dirs

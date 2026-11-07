@@ -41,8 +41,18 @@ RAM_LIMIT = float(os.getenv("RAM_LIMIT", "90"))              # %
 DISK_LIMIT = float(os.getenv("DISK_LIMIT", "90"))            # % used
 NET_LIMIT_MBIT = float(os.getenv("NET_LIMIT_MBIT", "50"))    # Mbit/s, up or down
 
+# When running in Docker, the host's root filesystem is bind-mounted here (e.g. /host)
+HOST_ROOT = os.getenv("HOST_ROOT", "").rstrip("/")
+
 IGNORED_FS = {"squashfs", "tmpfs", "devtmpfs", "overlay", "iso9660", "fuse.lxcfs"}
 NCPU = psutil.cpu_count() or 1
+
+
+def shown(path: str) -> str:
+    """Path as the host sees it (strips the container's HOST_ROOT prefix)."""
+    if HOST_ROOT and path.startswith(HOST_ROOT):
+        return path[len(HOST_ROOT):] or "/"
+    return path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("serverwatch")
@@ -105,7 +115,10 @@ def read_temps():
 def worst_disk():
     worst = None
     for part in psutil.disk_partitions(all=False):
-        if part.fstype in IGNORED_FS or part.mountpoint.startswith(("/snap", "/boot/efi")):
+        mp = part.mountpoint
+        if HOST_ROOT and not (mp == HOST_ROOT or mp.startswith(HOST_ROOT + "/")):
+            continue  # in Docker, only look at the host's mounts
+        if part.fstype in IGNORED_FS or shown(mp).startswith(("/snap", "/boot/efi")):
             continue
         try:
             u = psutil.disk_usage(part.mountpoint)
@@ -172,7 +185,7 @@ def biggest_dirs(mount: str, n=5) -> str:
         if size.isdigit() and path != mount:
             rows.append((int(size), path))
     rows.sort(reverse=True)
-    return "\n".join(f"`{path}` — {human(size)}" for size, path in rows[:n]) or "unknown"
+    return "\n".join(f"`{shown(path)}` — {human(size)}" for size, path in rows[:n]) or "unknown"
 
 
 def nethogs_top(n=5) -> str:
@@ -278,7 +291,7 @@ class WatchBot(discord.Client):
             mount, pct, used, total = m["disk"]
             checks["disk"] = (
                 pct >= DISK_LIMIT, "💾 Disk almost full",
-                f"`{mount}` at **{pct:.0f}%** ({human(used)} / {human(total)})",
+                f"`{shown(mount)}` at **{pct:.0f}%** ({human(used)} / {human(total)})",
                 lambda: {
                     "Biggest directories": biggest_dirs(mount),
                     "Heaviest disk I/O right now": top(
@@ -344,7 +357,7 @@ async def status(interaction: discord.Interaction):
     embed.add_field(name="CPU", value=f"{m['cpu']:.0f}% · load {m['load'][0]:.2f}")
     embed.add_field(name="RAM", value=f"{m['ram'].percent:.0f}% ({human(m['ram'].used)})")
     if m["disk"]:
-        embed.add_field(name=f"Disk {m['disk'][0]}", value=f"{m['disk'][1]:.0f}%")
+        embed.add_field(name=f"Disk {shown(m['disk'][0])}", value=f"{m['disk'][1]:.0f}%")
     embed.add_field(name="Temp", value=f"{m['temp']:.0f}°C" if m["temp"] is not None else "no sensor")
     embed.add_field(name="Uptime", value=f"{(time.time() - psutil.boot_time()) / 3600:.1f} h")
     embed.add_field(name="Top CPU", value=top(m["procs"], lambda p: p["cpu"], "cpu", n=3, min_value=0.1), inline=False)
