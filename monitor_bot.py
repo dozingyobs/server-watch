@@ -41,6 +41,13 @@ RAM_LIMIT = float(os.getenv("RAM_LIMIT", "90"))              # %
 DISK_LIMIT = float(os.getenv("DISK_LIMIT", "90"))            # % used
 NET_LIMIT_MBIT = float(os.getenv("NET_LIMIT_MBIT", "50"))    # Mbit/s, up or down
 
+# Power estimate (used when the CPU doesn't expose real power readings)
+POWER_IDLE_W = float(os.getenv("POWER_IDLE_W", "15"))        # whole-server draw at idle
+POWER_MAX_W = float(os.getenv("POWER_MAX_W", "60"))          # whole-server draw at 100% CPU
+POWER_OTHER_W = float(os.getenv("POWER_OTHER_W", "0"))       # extra watts to add to a CPU-only reading
+PRICE_PER_KWH = float(os.getenv("PRICE_PER_KWH", "0"))       # 0 = don't show cost
+CURRENCY = os.getenv("CURRENCY", "$")
+
 # When running in Docker, the host's root filesystem is bind-mounted here (e.g. /host)
 HOST_ROOT = os.getenv("HOST_ROOT", "").rstrip("/")
 
@@ -129,8 +136,69 @@ def worst_disk():
     return worst
 
 
+# ------------------------------------------------------------------ power ---
+# In Docker the host's /sys is visible under HOST_ROOT (the container's own /sys
+# hides the RAPL counters), so read from there when HOST_ROOT is set.
+RAPL_DIR = f"{HOST_ROOT}/sys/class/powercap"
+
+
+def read_rapl():
+    """Cumulative CPU package energy counters (µJ) from Intel/AMD RAPL, if readable."""
+    vals = {}
+    try:
+        names = sorted(os.listdir(RAPL_DIR))
+    except OSError:
+        return vals
+    for name in names:
+        # top-level package domains only (intel-rapl:0), not sub-domains (intel-rapl:0:0)
+        if not name.startswith("intel-rapl:") or name.count(":") != 1:
+            continue
+        base = os.path.join(RAPL_DIR, name)
+        try:
+            with open(base + "/energy_uj") as f:
+                energy = int(f.read())
+            with open(base + "/max_energy_range_uj") as f:
+                wrap = int(f.read())
+        except (OSError, ValueError):
+            continue  # not readable (needs root) or not present
+        vals[name] = (energy, wrap)
+    return vals
+
+
+def estimate_power(r0, r1, window, cpu_pct):
+    """Return (watts, source). Prefer real RAPL readings, else a linear CPU-load model."""
+    common = [k for k in r0 if k in r1]
+    if common and window > 0:
+        uj = 0
+        for k in common:
+            delta = r1[k][0] - r0[k][0]
+            if delta < 0:            # counter wrapped around
+                delta += r0[k][1]
+            uj += delta
+        watts = uj / 1e6 / window + POWER_OTHER_W
+        return watts, "CPU (RAPL) + other" if POWER_OTHER_W else "CPU only (RAPL)"
+    load = min(max(cpu_pct, 0.0), 100.0) / 100
+    return POWER_IDLE_W + (POWER_MAX_W - POWER_IDLE_W) * load, "estimated from CPU load"
+
+
+def money(kwh: float) -> str:
+    return f" ≈ {CURRENCY}{kwh * PRICE_PER_KWH:,.2f}" if PRICE_PER_KWH > 0 else ""
+
+
+def power_text(watts: float, source: str) -> str:
+    month_kwh = watts * 24 * 30 / 1000
+    return f"~{watts:.0f} W ({source})\nAt this draw: ~{month_kwh:.1f} kWh/month{money(month_kwh)}"
+
+
+def energy_text(wh: float) -> str:
+    return f"{wh / 1000:.3f} kWh since bot start{money(wh / 1000)}"
+
+
 def collect():
+    r0, t0 = read_rapl(), time.monotonic()
     procs, cpu = sample_procs()
+    r1, t1 = read_rapl(), time.monotonic()
+    power_w, power_src = estimate_power(r0, r1, t1 - t0, cpu)
     temp, temps = read_temps()
     return {
         "procs": procs,
@@ -141,6 +209,8 @@ def collect():
         "temps": temps,
         "disk": worst_disk(),
         "load": os.getloadavg(),
+        "power_w": power_w,
+        "power_src": power_src,
     }
 
 
@@ -239,6 +309,8 @@ class WatchBot(discord.Client):
         self.last_alert = {}
         self.active = set()
         self.prev_net = None
+        self.energy_wh = 0.0       # estimated energy used since the bot started
+        self.last_power_t = None
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -314,6 +386,9 @@ class WatchBot(discord.Client):
             return
         checks = self.build_checks(m, self.net_rates())
         now = time.time()
+        if self.last_power_t is not None:
+            self.energy_wh += m["power_w"] * (now - self.last_power_t) / 3600
+        self.last_power_t = now
 
         for key, (breached, title, summary, detail) in checks.items():
             if not breached:
@@ -337,7 +412,7 @@ class WatchBot(discord.Client):
             embed = discord.Embed(title=title, description=summary, colour=discord.Colour.red())
             for name, value in fields.items():
                 embed.add_field(name=name, value=value[:1024] or "—", inline=False)
-            embed.set_footer(text=os.uname().nodename)
+            embed.set_footer(text=f"{os.uname().nodename} · ~{m['power_w']:.0f} W")
             await self.send(embed=embed)
 
     @monitor.before_loop
@@ -360,6 +435,8 @@ async def status(interaction: discord.Interaction):
         embed.add_field(name=f"Disk {shown(m['disk'][0])}", value=f"{m['disk'][1]:.0f}%")
     embed.add_field(name="Temp", value=f"{m['temp']:.0f}°C" if m["temp"] is not None else "no sensor")
     embed.add_field(name="Uptime", value=f"{(time.time() - psutil.boot_time()) / 3600:.1f} h")
+    embed.add_field(name="⚡ Power", value=power_text(m["power_w"], m["power_src"]), inline=False)
+    embed.add_field(name="Energy used", value=energy_text(bot.energy_wh), inline=False)
     embed.add_field(name="Top CPU", value=top(m["procs"], lambda p: p["cpu"], "cpu", n=3, min_value=0.1), inline=False)
     embed.add_field(name="Top RAM", value=top(m["procs"], lambda p: p["rss"], "ram", n=3), inline=False)
     await interaction.followup.send(embed=embed)
