@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord server-watch bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root is needed for per-process disk I/O and nethogs; see README notes.
+User=root
+WorkingDirectory=/opt/serverwatch
+ExecStart=/opt/serverwatch/venv/bin/python /opt/serverwatch/monitor_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
