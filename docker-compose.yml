@@ -2,7 +2,7 @@ services:
   serverwatch:
     # Built and published by GitHub Actions (see .github/workflows/docker.yml).
     # Replace YOUR_GITHUB_USERNAME (lowercase) with your GitHub username.
-    image: ghcr.io/dozingyobs/server-watch:latest
+    image: ghcr.io/YOUR_GITHUB_USERNAME/serverwatch:latest
     # To build locally instead of pulling, uncomment this and run: docker compose up -d --build
     # build: .
     container_name: serverwatch
@@ -20,3 +20,4 @@ services:
       - NET_RAW
     volumes:
       - /:/host:ro          # read-only host filesystem for disk usage + biggest-dirs
+      - ./data:/data        # settings changed with /config are saved here

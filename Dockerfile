@@ -10,4 +10,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY monitor_bot.py .
 
+# Settings changed from Discord (/config) are saved to /data (a mounted volume)
+RUN mkdir -p /data
+ENV DATA_DIR=/data
+
 CMD ["python", "-u", "monitor_bot.py"]
